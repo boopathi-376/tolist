@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:table_calendar/table_calendar.dart';
+import 'package:intl/intl.dart';
 
 class CalendarPage extends StatefulWidget {
   final Map<String, List<Map<String, dynamic>>> tasks;
@@ -34,18 +35,45 @@ class _CalendarPageState extends State<CalendarPage> {
           const Divider(),
           Expanded(
             child: ListView(
-              children: widget.tasks.values.expand((list) => list).where((t) {
+              children: widget.tasks.values
+                  .expand((list) => list)
+                  .where((t) {
                 if (t["deadline"] == null) return false;
-                final date = DateTime.tryParse(t["deadline"]);
+
+                // Ensure deadline is DateTime
+                final date = t["deadline"] is DateTime
+                    ? t["deadline"]
+                    : DateTime.tryParse(t["deadline"].toString());
+
                 return date != null && isSameDay(date, _selectedDay);
-              }).map((t) {
-                return ListTile(
-                  title: Text(t["title"]),
-                  trailing: t["completed"]
-                      ? const Icon(Icons.check, color: Colors.green)
-                      : const Icon(Icons.pending, color: Colors.orange),
+              })
+                  .map((t) {
+                final deadline = t["deadline"] is DateTime
+                    ? t["deadline"]
+                    : DateTime.tryParse(t["deadline"].toString());
+
+                final formattedDeadline = deadline != null
+                    ? DateFormat('dd-MM-yyyy hh:mm a').format(deadline)
+                    : 'No deadline';
+
+                return Card(
+                  margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: ListTile(
+                    title: Text(t["title"] ?? 'Untitled Task'),
+                    subtitle: Text(
+                      "Deadline: $formattedDeadline",
+                      style: const TextStyle(fontSize: 12, color: Colors.grey),
+                    ),
+                    trailing: t["completed"] == true
+                        ? const Icon(Icons.check, color: Colors.green)
+                        : const Icon(Icons.pending, color: Colors.orange),
+                  ),
                 );
-              }).toList(),
+              })
+                  .toList(),
             ),
           )
         ],

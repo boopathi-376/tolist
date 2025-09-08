@@ -5,7 +5,10 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'calendarPage.dart';
+import 'loginPage.dart';
 import 'statsPage.dart';
+import 'package:intl/intl.dart';
+
 
 class HomePage extends StatefulWidget {
   final User? user;
@@ -70,73 +73,117 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
   // -------------------- Save Tasks --------------------
   Future<void> _saveTasks() async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('tasks', jsonEncode(_tasks));
 
+    // Convert _tasks to encodable map
+    final encodableTasks = _tasks.map((category, list) {
+      return MapEntry(
+        category,
+        list.map((task) {
+          return {
+            ...task,
+            'deadline': task['deadline'] is DateTime
+                ? (task['deadline'] as DateTime).toIso8601String()
+                : task['deadline'],
+          };
+        }).toList(),
+      );
+    });
+
+    await prefs.setString('tasks', jsonEncode(encodableTasks));
+
+    // Save to Supabase as before
     final userId = widget.user?.id;
-    if (userId != null) {
-      try {
-        // Delete previous tasks for this user
-        await Supabase.instance.client.from('tasks').delete().eq('user_id', userId);
+    if (userId == null) return;
 
-        // Insert current tasks
-        for (var entry in _tasks.entries) {
-          if (entry.key == "All") continue; // Skip "All" tab
-          for (var task in entry.value) {
-            final category = entry.key.isNotEmpty ? entry.key : 'Work';
-            await Supabase.instance.client.from('tasks').insert({
-              'user_id': userId,
-              'category': category,
-              'title': task['title'] ?? '',
-              'description': task['description'] ?? '',
-              'completed': task['completed'] ?? false,
-              'deadline': task['deadline'] ?? null,
-            });
-          }
+    try {
+      await Supabase.instance.client.from('user_tasks').delete().eq('user_id', userId);
+
+      for (var entry in _tasks.entries) {
+        if (entry.key == "All") continue;
+
+        for (var task in entry.value) {
+          final category = entry.key;
+
+          await Supabase.instance.client
+              .from('user_tasks')
+              .insert({
+            'user_id': userId,
+            'category': category,
+            'title': task['title'] ?? '',
+            'description': task['description'] ?? '',
+            'completed': task['completed'] ?? false,
+            'deadline': task['deadline'] is DateTime
+                ? (task['deadline'] as DateTime).toIso8601String()
+                : task['deadline'],
+          })
+              .select('*');
         }
-      } catch (e) {
-        print("Error saving tasks to Supabase: $e");
       }
+    } catch (e) {
+      print("❌ Supabase save error: $e");
     }
   }
+
+
 
   // -------------------- Load Tasks --------------------
   Future<void> _loadTasks() async {
     final prefs = await SharedPreferences.getInstance();
     final storedTasks = prefs.getString('tasks');
 
+    void resetCategories() {
+      _tasks.clear();
+      _tasks["All"] = [];
+      _tasks["Work"] = [];
+      _tasks["Personal"] = [];
+      _tasks["Urgent"] = [];
+    }
+
+    resetCategories();
+
+    // Load from SharedPreferences
     if (storedTasks != null) {
       try {
         final decoded = jsonDecode(storedTasks) as Map<String, dynamic>;
-        _tasks.clear();
         decoded.forEach((key, value) {
-          _tasks[key] = List<Map<String, dynamic>>.from(value);
+          if (_tasks.containsKey(key)) {
+            _tasks[key] = List<Map<String, dynamic>>.from(value);
+          }
         });
       } catch (e) {
-        print("Error loading tasks from SharedPreferences: $e");
+        print("⚠️ Error loading tasks from SharedPreferences: $e");
       }
     }
 
+    // Load from Supabase
     final userId = widget.user?.id;
     if (userId != null) {
       try {
-        final response = await Supabase.instance.client.from('tasks').select().eq('user_id', userId);
+        final response = await Supabase.instance.client
+            .from('user_tasks')
+            .select()
+            .eq('user_id', userId);
 
-        if (response != null && response.isNotEmpty) {
-          _tasks.clear();
+        if (response.isNotEmpty) {
+          resetCategories();
+
           for (var row in response) {
             final category = row['category'] ?? 'Work';
+
             _tasks[category] ??= [];
             _tasks[category]!.add({
               "title": row['title'] ?? '',
               "description": row['description'] ?? '',
               "completed": row['completed'] ?? false,
-              "deadline": row['deadline'],
+              "deadline": row['deadline'] != null
+                  ? DateTime.parse(row['deadline'].toString())
+                  : null,
               "category": category,
             });
           }
         }
       } catch (e) {
-        print("Error loading tasks from Supabase: $e");
+        print("❌ Supabase load error: $e");
       }
     }
 
@@ -264,6 +311,25 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
       }
     }
   }
+  String formatDeadline(dynamic deadline) {
+    if (deadline == null) return "No deadline";
+
+    try {
+      DateTime dt;
+      if (deadline is String) {
+        dt = DateTime.parse(deadline);
+      } else if (deadline is DateTime) {
+        dt = deadline;
+      } else {
+        return "Invalid date";
+      }
+
+      return DateFormat('dd-MM-yyyy hh:mm a').format(dt);
+    } catch (e) {
+      return "Invalid date";
+    }
+  }
+
 
   // -------------------- Show Add/Edit Dialog --------------------
   void _showAddTaskDialog({Map<String, dynamic>? task, String? category, int? index}) {
@@ -389,8 +455,16 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
   // -------------------- Logout --------------------
   Future<void> _logout() async {
     await Supabase.instance.client.auth.signOut();
-    if (mounted) Navigator.pop(context);
+
+    if (mounted) {
+      Navigator.pushAndRemoveUntil(
+        context,
+        MaterialPageRoute(builder: (_) => const LoginPage()),
+            (route) => false, // remove all previous routes
+      );
+    }
   }
+
 
   // -------------------- Build UI --------------------
   @override
@@ -500,7 +574,10 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
                           children: [
                             if (task['description'] != null && task['description'].isNotEmpty)
                               Text(task['description'], style: const TextStyle(color: Colors.grey, fontSize: 12)),
-                            Text("Deadline: ${task['deadline'] ?? 'No deadline'}", style: const TextStyle(color: Colors.grey, fontSize: 12)),
+                            Text(
+                              "Deadline: ${formatDeadline(task['deadline'])}",
+                              style: const TextStyle(color: Colors.grey, fontSize: 12),
+                            ),
                           ],
                         ),
                         trailing: Row(
